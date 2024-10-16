@@ -1,0 +1,87 @@
+name: Deploy
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "STAGE"
+        required: true
+        type: choice
+        options:
+          - "stg"
+          - "prod"
+        default: stg
+
+jobs:
+  Deploy:
+    name: Deploy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get previous tag
+        id: pre_tag
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const stage = '${{ github.event.inputs.stage }}';
+            const isPrerelease = (stage === 'stg');
+
+            console.log(`Fetching the latest ${isPrerelease ? 'prerelease' : 'release'} tag...`);
+
+            const releases = await github.rest.repos.listReleases({
+              owner,
+              repo,
+            });
+            const tag = releases.data
+              .filter(release => release.prerelease === isPrerelease)
+              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0]?.tag_name;
+
+            core.exportVariable('pre_tag', tag);
+            console.log(`Latest tag fetched: ${tag}`);
+
+      - name: Generate tag
+        id: generate_tag
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const preTag = '${{ env.pre_tag }}';
+            const stage = '${{ github.event.inputs.stage }}';
+
+            /*
+              タグがパターンに一致した場合、分解して配列で返却する。
+              例: 20210901.stg.1 -> ['20210901.stg.1', '20210901', 'stg', '1']
+            */
+            const parsePreTag = (tag) => {
+              const pattern = /^(\d{8})\.(stg|prod)\.(\d+)$/;
+              return tag ? tag.match(pattern) : null;
+            };
+            /*
+              前回のタグが今日の日付／ステージと同じ場合、リリースカウントをインクリメント。
+              上記以外の場合、リリースカウントは1。
+            */
+            const computeReleaseCount = (match, today, stage) => {
+              if (match && match[1] === today && match[2] === stage) {
+                return parseInt(match[3], 10) + 1;
+              }
+              return 1;
+            };
+
+            const today = new Date().toISOString().split('T')[0].replace(/-/g, '');
+            const preTagMatch = parsePreTag(preTag);
+
+            const releaseCount = computeReleaseCount(preTagMatch, today, stage);
+            const releaseTag = `${today}.${stage}.${releaseCount}`;
+
+            console.log(`Generated release tag: ${releaseTag}`);
+            core.exportVariable('release_tag', releaseTag);
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: ${{ env.release_tag }}
+          tag_name: ${{ env.release_tag }}
+          prerelease: ${{ github.event.inputs.stage == 'stg' && true || false }}
+          generate_release_notes: true
+          files: src/*
